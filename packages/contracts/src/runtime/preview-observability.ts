@@ -96,13 +96,19 @@ export function buildPreviewBaseHrefBridge(
     var named = document.getElementsByName ? document.getElementsByName(id)[0] : null;
     return named || null;
   }
-  document.addEventListener('click', function(ev){
+  // Bubbling on window, not capturing on document: an artifact may use a
+  // fragment href as a tab or disclosure trigger, and its own handler must get
+  // the click first. This is the fallback for clicks nobody claimed.
+  window.addEventListener('click', function(ev){
     if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
     if (!document.querySelector('base[data-od-project-preview-base]')) return;
     var origin = ev.target;
     var link = origin && origin.closest ? origin.closest('a[href]') : null;
     if (!link || link.hasAttribute('download')) return;
-    var linkTarget = link.getAttribute('target');
+    // The reserved target _self is ASCII case-insensitive, so target="_SELF"
+    // is same-context too and must not fall through to base-resolved
+    // navigation.
+    var linkTarget = String(link.getAttribute('target') || '').toLowerCase();
     if (linkTarget && linkTarget !== '_self') return;
     var href = link.getAttribute('href');
     if (!href || href.charAt(0) !== '#') return;
@@ -116,7 +122,7 @@ export function buildPreviewBaseHrefBridge(
       return;
     }
     target.scrollIntoView({ behavior: 'auto', block: 'start' });
-  }, true);
+  }, false);
   announce();
 })();</script>`;
 }

@@ -31,13 +31,15 @@ function runBridge(options: { withContainmentBase: boolean; targets?: readonly s
     };
   }
   const clickHandlers: Array<(event: unknown) => void> = [];
+  const artifactHandlers: Array<(event: unknown) => void> = [];
   const scrollToCalls: Array<readonly [number, number]> = [];
 
   const document = {
     baseURI: 'http://127.0.0.1:8796/api/projects/p1/preview/scope-1/',
     documentElement: { scrollIntoView() {} },
     addEventListener(type: string, handler: (event: unknown) => void) {
-      if (type === 'click') clickHandlers.push(handler);
+      // Stands in for a handler the previewed artifact registered itself.
+      if (type === 'click') artifactHandlers.push(handler);
     },
     querySelector(selector: string) {
       if (selector !== 'base[data-od-project-preview-base]') return null;
@@ -57,7 +59,9 @@ function runBridge(options: { withContainmentBase: boolean; targets?: readonly s
     window: {
       document,
       parent: { postMessage() {} },
-      addEventListener() {},
+      addEventListener(type: string, handler: (event: unknown) => void) {
+        if (type === 'click') clickHandlers.push(handler);
+      },
       scrollTo(left: number, top: number) {
         scrollToCalls.push([left, top]);
       },
@@ -99,11 +103,18 @@ function runBridge(options: { withContainmentBase: boolean; targets?: readonly s
       },
       ...overrides,
     };
+    // Event order in the document: handlers the artifact registered run while
+    // the event bubbles, and the bridge's window listener is last.
+    for (const handler of artifactHandlers) handler(event);
     for (const handler of clickHandlers) handler(event);
     return event;
   };
 
-  return { click, elements, scrollToCalls };
+  const registerArtifactClickHandler = (handler: (event: unknown) => void) => {
+    artifactHandlers.push(handler);
+  };
+
+  return { click, elements, scrollToCalls, registerArtifactClickHandler };
 }
 
 describe('preview base href bridge', () => {
@@ -160,5 +171,32 @@ describe('preview base href bridge', () => {
     expect(bridge.click({ href: '#proposal-02' }, { metaKey: true }).defaultPrevented).toBe(false);
     expect(bridge.click({ href: '#proposal-02' }, { button: 1 }).defaultPrevented).toBe(false);
     expect(bridge.elements['proposal-02']?.scrolled).toEqual([]);
+  });
+
+  it('yields to an artifact that claims a fragment click for its own tabs or disclosures', () => {
+    const bridge = runBridge({ withContainmentBase: true, targets: ['proposal-02'] });
+    let artifactHandled = 0;
+    bridge.registerArtifactClickHandler((event) => {
+      artifactHandled += 1;
+      (event as { preventDefault(): void }).preventDefault();
+    });
+
+    const event = bridge.click({ href: '#proposal-02' });
+
+    expect(artifactHandled).toBe(1);
+    expect(event.defaultPrevented).toBe(true);
+    expect(bridge.elements['proposal-02']?.scrolled).toEqual([]);
+    expect(bridge.scrollToCalls).toEqual([]);
+  });
+
+  it('treats an uppercase _SELF target as same-context navigation', () => {
+    const bridge = runBridge({ withContainmentBase: true, targets: ['proposal-02'] });
+
+    const event = bridge.click({ href: '#proposal-02', target: '_SELF' });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(bridge.elements['proposal-02']?.scrolled).toEqual([
+      { behavior: 'auto', block: 'start' },
+    ]);
   });
 });
