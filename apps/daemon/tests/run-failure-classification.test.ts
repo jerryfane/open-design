@@ -728,6 +728,34 @@ describe('classifyRunFailure', () => {
     });
   });
 
+  it('still reports auth when the agent itself needs a login and the watchdog fired', () => {
+    // The counterpart of the case above: the timeout guard must not swallow a
+    // real credential failure just because the watchdog was the thing that
+    // ended the run.
+    const timeoutMessage = 'Agent stalled without emitting any new output for 600s.';
+
+    expect(
+      classifyRunFailure({
+        result: 'failed',
+        agentId: 'codex',
+        status: {
+          status: 'failed',
+          error: timeoutMessage,
+          signal: null,
+          exitCode: 1,
+          errorCode: 'AGENT_AUTH_REQUIRED',
+        },
+        errorCode: 'AGENT_AUTH_REQUIRED',
+        terminalTrigger: 'inactivity_watchdog',
+        events: [errorEvent('AGENT_AUTH_REQUIRED', 'not authenticated', false)],
+      }),
+    ).toMatchObject({
+      failure_category: 'auth',
+      failure_detail: 'auth_required',
+      user_action: 'login',
+    });
+  });
+
   it('keeps an explicit watchdog trigger when a provider error supplies the failure bucket', () => {
     expect(
       classifyRunFailure({
