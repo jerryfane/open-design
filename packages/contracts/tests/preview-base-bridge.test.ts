@@ -30,16 +30,22 @@ function runBridge(options: { withContainmentBase: boolean; targets?: readonly s
       },
     };
   }
-  const clickHandlers: Array<(event: unknown) => void> = [];
-  const artifactHandlers: Array<(event: unknown) => void> = [];
+  // One ordered list per target, because registration order is exactly what
+  // decides whether the bridge or the artifact sees a click first.
+  const windowClickHandlers: Array<(event: unknown) => void> = [];
+  const documentClickHandlers: Array<(event: unknown) => void> = [];
+  const domReadyHandlers: Array<() => void> = [];
+  const pendingTasks: Array<() => void> = [];
   const scrollToCalls: Array<readonly [number, number]> = [];
 
   const document = {
     baseURI: 'http://127.0.0.1:8796/api/projects/p1/preview/scope-1/',
+    // The preview injects this bridge while the document is still parsing.
+    readyState: 'loading',
     documentElement: { scrollIntoView() {} },
     addEventListener(type: string, handler: (event: unknown) => void) {
-      // Stands in for a handler the previewed artifact registered itself.
-      if (type === 'click') artifactHandlers.push(handler);
+      if (type === 'click') documentClickHandlers.push(handler);
+      if (type === 'DOMContentLoaded') domReadyHandlers.push(handler as () => void);
     },
     querySelector(selector: string) {
       if (selector !== 'base[data-od-project-preview-base]') return null;
@@ -56,11 +62,15 @@ function runBridge(options: { withContainmentBase: boolean; targets?: readonly s
   const sandbox = {
     document,
     URL,
+    setTimeout(callback: () => void) {
+      pendingTasks.push(callback);
+      return 0;
+    },
     window: {
       document,
       parent: { postMessage() {} },
       addEventListener(type: string, handler: (event: unknown) => void) {
-        if (type === 'click') clickHandlers.push(handler);
+        if (type === 'click') windowClickHandlers.push(handler);
       },
       scrollTo(left: number, top: number) {
         scrollToCalls.push([left, top]);
@@ -75,7 +85,18 @@ function runBridge(options: { withContainmentBase: boolean; targets?: readonly s
     .replace(/^<script data-od-preview-base-bridge>/, '')
     .replace(/<\/script>$/, '');
   runInNewContext(script, sandbox);
-  expect(clickHandlers).toHaveLength(1);
+  // Nothing is listening yet: the fallback must not outrank scripts the page
+  // has not even parsed.
+  expect(windowClickHandlers).toHaveLength(0);
+
+  const finishLoading = () => {
+    const before = windowClickHandlers.length;
+    for (const handler of domReadyHandlers) handler();
+    const tasks = pendingTasks.splice(0, pendingTasks.length);
+    for (const task of tasks) task();
+    // The fallback installs exactly once, behind whatever the page registered.
+    expect(windowClickHandlers).toHaveLength(before + 1);
+  };
 
   const click = (
     link: { href: string; target?: string; download?: boolean },
@@ -103,23 +124,31 @@ function runBridge(options: { withContainmentBase: boolean; targets?: readonly s
       },
       ...overrides,
     };
-    // Event order in the document: handlers the artifact registered run while
-    // the event bubbles, and the bridge's window listener is last.
-    for (const handler of artifactHandlers) handler(event);
-    for (const handler of clickHandlers) handler(event);
+    // Real dispatch order: document listeners while the event bubbles, then
+    // window listeners in the order they were registered.
+    for (const handler of documentClickHandlers) handler(event);
+    for (const handler of windowClickHandlers) handler(event);
     return event;
   };
 
-  const registerArtifactClickHandler = (handler: (event: unknown) => void) => {
-    artifactHandlers.push(handler);
+  return {
+    click,
+    elements,
+    scrollToCalls,
+    finishLoading,
+    registerArtifactDocumentHandler: (handler: (event: unknown) => void) => {
+      documentClickHandlers.push(handler);
+    },
+    registerArtifactWindowHandler: (handler: (event: unknown) => void) => {
+      windowClickHandlers.push(handler);
+    },
   };
-
-  return { click, elements, scrollToCalls, registerArtifactClickHandler };
 }
 
 describe('preview base href bridge', () => {
   it('scrolls an in-page anchor instead of leaving the previewed document', () => {
     const bridge = runBridge({ withContainmentBase: true, targets: ['proposal-02'] });
+    bridge.finishLoading();
 
     const event = bridge.click({ href: '#proposal-02' });
 
@@ -131,6 +160,7 @@ describe('preview base href bridge', () => {
 
   it('claims a fragment that resolves to nothing rather than letting it unload the preview', () => {
     const bridge = runBridge({ withContainmentBase: true });
+    bridge.finishLoading();
 
     const event = bridge.click({ href: '#missing-section' });
 
@@ -140,6 +170,7 @@ describe('preview base href bridge', () => {
 
   it('sends a bare hash to the top of the document', () => {
     const bridge = runBridge({ withContainmentBase: true });
+    bridge.finishLoading();
 
     const event = bridge.click({ href: '#' });
 
@@ -149,6 +180,7 @@ describe('preview base href bridge', () => {
 
   it('leaves fragment links alone when no containment base governs the document', () => {
     const bridge = runBridge({ withContainmentBase: false, targets: ['proposal-02'] });
+    bridge.finishLoading();
 
     const event = bridge.click({ href: '#proposal-02' });
 
@@ -158,6 +190,7 @@ describe('preview base href bridge', () => {
 
   it('keeps file links, new-tab links, and downloads on their normal path', () => {
     const bridge = runBridge({ withContainmentBase: true, targets: ['proposal-02'] });
+    bridge.finishLoading();
 
     expect(bridge.click({ href: 'gallery.html' }).defaultPrevented).toBe(false);
     expect(bridge.click({ href: '#proposal-02', target: '_blank' }).defaultPrevented).toBe(false);
@@ -167,16 +200,18 @@ describe('preview base href bridge', () => {
 
   it('ignores modified and non-primary clicks so open-in-new-tab still works', () => {
     const bridge = runBridge({ withContainmentBase: true, targets: ['proposal-02'] });
+    bridge.finishLoading();
 
     expect(bridge.click({ href: '#proposal-02' }, { metaKey: true }).defaultPrevented).toBe(false);
     expect(bridge.click({ href: '#proposal-02' }, { button: 1 }).defaultPrevented).toBe(false);
     expect(bridge.elements['proposal-02']?.scrolled).toEqual([]);
   });
 
-  it('yields to an artifact that claims a fragment click for its own tabs or disclosures', () => {
+  it('yields to an artifact that claims a fragment click on the document', () => {
     const bridge = runBridge({ withContainmentBase: true, targets: ['proposal-02'] });
+    bridge.finishLoading();
     let artifactHandled = 0;
-    bridge.registerArtifactClickHandler((event) => {
+    bridge.registerArtifactDocumentHandler((event) => {
       artifactHandled += 1;
       (event as { preventDefault(): void }).preventDefault();
     });
@@ -189,8 +224,28 @@ describe('preview base href bridge', () => {
     expect(bridge.scrollToCalls).toEqual([]);
   });
 
+  it('yields to an artifact that delegates fragment clicks on window', () => {
+    const bridge = runBridge({ withContainmentBase: true, targets: ['proposal-02'] });
+    // An authored script parsed after the bridge: on one target, listeners run
+    // in registration order, so this only works because the bridge defers.
+    let artifactHandled = 0;
+    bridge.registerArtifactWindowHandler((event) => {
+      artifactHandled += 1;
+      (event as { preventDefault(): void }).preventDefault();
+    });
+    bridge.finishLoading();
+
+    const event = bridge.click({ href: '#proposal-02' });
+
+    expect(artifactHandled).toBe(1);
+    expect(event.defaultPrevented).toBe(true);
+    expect(bridge.elements['proposal-02']?.scrolled).toEqual([]);
+    expect(bridge.scrollToCalls).toEqual([]);
+  });
+
   it('treats an uppercase _SELF target as same-context navigation', () => {
     const bridge = runBridge({ withContainmentBase: true, targets: ['proposal-02'] });
+    bridge.finishLoading();
 
     const event = bridge.click({ href: '#proposal-02', target: '_SELF' });
 

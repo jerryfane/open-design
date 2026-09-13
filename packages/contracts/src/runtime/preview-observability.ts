@@ -96,10 +96,7 @@ export function buildPreviewBaseHrefBridge(
     var named = document.getElementsByName ? document.getElementsByName(id)[0] : null;
     return named || null;
   }
-  // Bubbling on window, not capturing on document: an artifact may use a
-  // fragment href as a tab or disclosure trigger, and its own handler must get
-  // the click first. This is the fallback for clicks nobody claimed.
-  window.addEventListener('click', function(ev){
+  function onFragmentClick(ev){
     if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
     if (!document.querySelector('base[data-od-project-preview-base]')) return;
     var origin = ev.target;
@@ -122,7 +119,26 @@ export function buildPreviewBaseHrefBridge(
       return;
     }
     target.scrollIntoView({ behavior: 'auto', block: 'start' });
-  }, false);
+  }
+  // Registered LAST, not first. Bubbling alone is not enough: this bridge is
+  // injected right after <head> opens, so a window listener added here would
+  // precede every authored one on the same target, and listeners on one target
+  // run in registration order. Deferring to a task after DOMContentLoaded puts
+  // it behind both synchronous scripts and their DOM-ready handlers, so an
+  // artifact that delegates fragment clicks on window still wins. A task, not
+  // a microtask: a microtask checkpoint runs between DOMContentLoaded
+  // listeners, which would still land ahead of an artifact handler registered
+  // by a later one.
+  function installFragmentFallback(){
+    window.addEventListener('click', onFragmentClick, false);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function(){
+      setTimeout(installFragmentFallback, 0);
+    });
+  } else {
+    setTimeout(installFragmentFallback, 0);
+  }
   announce();
 })();</script>`;
 }
