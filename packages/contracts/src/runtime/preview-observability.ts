@@ -79,6 +79,44 @@ export function buildPreviewBaseHrefBridge(
       }, '*');
     } catch (_) {}
   });
+  // The containment base points at the minted preview scope, not at this
+  // document, and a fragment-only href resolves against the base URI. Left
+  // alone, an href of "#section" becomes a cross-document GET on the scope
+  // directory -- a path the daemon does not serve -- and the preview is
+  // replaced by a 404 body. Only this base creates that mismatch, so the
+  // interception is gated on it still governing the document.
+  function fragmentTarget(href){
+    var id = href.slice(1);
+    if (!id) return document.documentElement;
+    try {
+      id = decodeURIComponent(id);
+    } catch {}
+    var byId = document.getElementById(id);
+    if (byId) return byId;
+    var named = document.getElementsByName ? document.getElementsByName(id)[0] : null;
+    return named || null;
+  }
+  document.addEventListener('click', function(ev){
+    if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+    if (!document.querySelector('base[data-od-project-preview-base]')) return;
+    var origin = ev.target;
+    var link = origin && origin.closest ? origin.closest('a[href]') : null;
+    if (!link || link.hasAttribute('download')) return;
+    var linkTarget = link.getAttribute('target');
+    if (linkTarget && linkTarget !== '_self') return;
+    var href = link.getAttribute('href');
+    if (!href || href.charAt(0) !== '#') return;
+    // Claimed even when the id resolves to nothing: the alternative is the
+    // same cross-document GET, which answers 404 and unloads the artifact.
+    ev.preventDefault();
+    var target = fragmentTarget(href);
+    if (!target) return;
+    if (target === document.documentElement) {
+      window.scrollTo(0, 0);
+      return;
+    }
+    target.scrollIntoView({ behavior: 'auto', block: 'start' });
+  }, true);
   announce();
 })();</script>`;
 }
